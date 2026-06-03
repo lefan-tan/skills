@@ -4,23 +4,14 @@ Personal Claude Code skills.
 
 ## Install
 
-Clone into `~/.claude/skills/` so each subdirectory becomes a discoverable skill:
-
 ```bash
-git clone git@github.com:lefan-tan/skills.git ~/.claude/skills-repo
+git clone git@github.com:lefan-tan/skills.git ~/Documents/Code/skills
+cd ~/Documents/Code/skills
+./install.sh                          # install all skills in repo
+./install.sh lefan-motion-net-pr-push # or just one
 ```
 
-Then symlink each skill you want:
-
-```bash
-ln -s ~/.claude/skills-repo/lefan-motion-net-pr-push ~/.claude/skills/lefan-motion-net-pr-push
-```
-
-Or clone directly into `~/.claude/skills/` if you have no existing skills there:
-
-```bash
-git clone git@github.com:lefan-tan/skills.git ~/.claude/skills
-```
+Script symlinks each skill dir into `~/.claude/skills/`. Re-run after `git pull` to pick up new skills. Existing non-symlink dirs are skipped — remove manually if you want to switch.
 
 ## Skills
 
