@@ -1,7 +1,7 @@
 ---
 name: lefan-motion-net-pr-push
 description: Lefan's PR push flow for motion.net — runs C# code review, gates on user-confirmed fixes, enforces csharpier, runs Roslyn analyzer diagnostic pass, regenerates OpenAPI schemas when DTOs/websockets/pub-sub changed, then opens a draft PR (push with --no-verify) and runs signoff.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Lefan motion.net PR Push
@@ -9,6 +9,33 @@ version: 1.1.0
 Personal pipeline for shipping a motion.net branch as a draft PR. Run from the repo root on a feature branch with committed changes.
 
 ## Process
+
+### Step 0: Branch Strategy (default = new branch off `main`)
+
+Before anything else, decide where these changes live. **Default: a dedicated new branch off `main`, one PR per topic.** Do not pile unrelated work onto whatever branch happens to be checked out.
+
+Inspect state:
+
+```bash
+git status --porcelain
+git log --oneline origin/main..HEAD
+gh pr list --head "$(git branch --show-current)" --state open --json number,title,baseRefName
+```
+
+Decide:
+
+- **Current branch has commits/an open PR on a DIFFERENT topic than the pending changes** → STOP. The pending work does not belong here. Create a new branch off `origin/main` (default) and carry the uncommitted working-tree changes over:
+  ```bash
+  git fetch origin main --quiet
+  git checkout -b <lefan/topic-or-ticket-slug> origin/main
+  ```
+  Uncommitted changes follow the working tree (git only refuses on real conflict).
+- **Current branch is empty relative to `main` (no unrelated commits), or its existing commits ARE the same topic** → stay on it.
+- **Changes genuinely depend on an in-flight branch** → stack: new branch off that branch, and the PR base is that branch (see Step 6). Only when there is a real dependency.
+
+If a Linear ticket is provided, fold its identifier into the branch slug (e.g. `lefan/wndly-1366-ensure-preflight-called`) and reference it in the PR body.
+
+Never silently default to `main` as the PR base when the working branch carries unrelated commits — that lands someone else's stack into `main`.
 
 ### Step 1: C# Code Review
 
@@ -218,6 +245,7 @@ Per project CLAUDE.md, run after PR creation:
 
 ## Safety Rules
 
+- DEFAULT to a new branch off `main` (Step 0). Never commit/push topic changes onto a branch whose open PR is about something else.
 - NEVER skip Step 1 user confirmation. No fixes without explicit approval.
 - NEVER use `gh pr ready` or `gh pr merge`. Always draft.
 - NEVER omit `--draft` on create.
