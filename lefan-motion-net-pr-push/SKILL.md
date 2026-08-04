@@ -1,12 +1,12 @@
 ---
 name: lefan-motion-net-pr-push
 description: Lefan's PR push flow for motion.net — runs C# code review, gates on user-confirmed fixes, enforces csharpier, runs Roslyn analyzer diagnostic pass, regenerates OpenAPI schemas when DTOs/websockets/pub-sub changed, then opens a draft PR (push with --no-verify) and runs signoff.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Lefan motion.net PR Push
 
-Personal pipeline for shipping a motion.net branch as a draft PR. Run from the repo root on a feature branch with committed changes.
+Personal pipeline for shipping a motion.net branch as a draft PR. Run from the repo root on a feature branch with committed changes. When all checks pass (clean review, csharpier pass, clean diagnostics), it creates the draft PR without stopping to ask — finishing the PR is the goal.
 
 ## Process
 
@@ -45,11 +45,9 @@ Invoke the `/dotnet-csharp-code-review` skill on the pending changes (current br
 - Group by severity (blocker / suggestion / nit).
 - Present a numbered list to the user.
 
-**STOP. Wait for user.**
+**If there are blocker-severity findings, STOP and wait for the user:** ask "Which findings should I fix? (numbers, `all`, `blockers`, or `none`)" and do not proceed until they reply.
 
-Ask: "Which findings should I fix? (numbers, `all`, `blockers`, or `none`)"
-
-Do not proceed until the user replies.
+**If there are no blockers** (only suggestions/nits, or a clean review), note the findings and proceed automatically. The user wants the PR created when everything is good.
 
 ### Step 2: Apply Confirmed Fixes
 
@@ -106,7 +104,7 @@ Triage findings into three buckets:
 - **False positives in domain context** — e.g. CA1054 "URI params shouldn't be strings" on Google Ads `TrackingUrlTemplate` (placeholder tokens like `{lpurl}` are not valid `Uri`). Suppress with `[SuppressMessage(...)]` + `Justification` explaining why.
 - **Out of scope** — pre-existing diagnostics in code untouched by this PR. Leave alone; do not expand scope.
 
-STOP and surface the actionable + false-positive list to user with the same numbered-fix prompt as Step 1: "Apply diagnostic fixes? (numbers, `all`, `none`)". Do not auto-suppress without confirmation — suppressions are durable and need justification text.
+If there are **actionable** findings or proposed suppressions, STOP and surface the list with the same numbered-fix prompt as Step 1: "Apply diagnostic fixes? (numbers, `all`, `none`)". Do not auto-suppress without confirmation — suppressions are durable and need justification text. If diagnostics are **clean**, proceed automatically.
 
 After confirmed fixes, commit: `chore(<scope>): Address analyzer diagnostics`. Then re-run the build (or IDE diagnostics) to confirm clean.
 
@@ -246,7 +244,7 @@ Per project CLAUDE.md, run after PR creation:
 ## Safety Rules
 
 - DEFAULT to a new branch off `main` (Step 0). Never commit/push topic changes onto a branch whose open PR is about something else.
-- NEVER skip Step 1 user confirmation. No fixes without explicit approval.
+- Stop for Step 1/Step 4 confirmation only when there are blocker review findings or actionable diagnostics. No code fixes without explicit approval — but a clean pass proceeds straight to PR creation without prompting.
 - NEVER use `gh pr ready` or `gh pr merge`. Always draft.
 - NEVER omit `--draft` on create.
 - `--no-verify` is intentional here (user preference). Do not extend it to other repos.
