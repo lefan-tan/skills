@@ -1,7 +1,7 @@
 ---
 name: lefan-launch-adruns-meta-adsets
 description: Launch CAMP ad-agent runs as new (tracked) Meta ad sets under an existing live Meta campaign for a team — register outputs, pre-create ad-set aggregate drafts, publish via motion.net stateless-meta-publish with entityLinking. Handles style filtering, location targeting from Business Info, website vs Instant Form modes, and the CBO/tokenSource/aggregate gotchas that block naive attempts.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Launch CAMP ad runs as Meta ad sets (tracked) under an existing campaign
@@ -54,6 +54,8 @@ Use the scratchpad dir for all payloads/creds. Keep the admin token and DB passw
 7. **Locations** serialize as snake_case `MetaCustomLocation`: `{latitude, longitude, radius(int), distance_unit}`.
 
 8. **Signed GCS URLs expire (~1h).** Re-fetch run details right before registering.
+
+8b. **Ad-set `customLocations` must EXACTLY match the team's CURRENT Business Info** ad-targeting preferences — motion.net rejects otherwise ("Ad set targeting locations must exactly match the team's Business Info ad-targeting preferences"). Business Info gets edited between sessions, so **re-fetch Business Info immediately before publish** and build targeting from that live set (not an earlier snapshot). Same count + values + snake_case.
 
 9. **`workflowId` is the Temporal idempotency key** — a retried identical request attaches to the in-flight run (no double publish). Use a fresh id per distinct attempt.
 
@@ -148,7 +150,10 @@ Operator actions: set the campaign daily budget (CBO), flip ad sets `PAUSED→ac
 - Each ad set adds `"instantForm": { "performanceGoal": "leads" | "conversionLeads", "existingFormId": "<form id>" }` (only valid on `target:new`).
 - `tokenSource: "adAccount"` (mandatory), **omit `metaPixelId`**, form must belong to the campaign's `facebookPageId`.
 - `leads`→`LEAD_GENERATION`; `conversionLeads`→`QUALITY_LEAD` (uses a `Schedule` conversion event; no pixel).
-- **Cannot share a lowest-cost CBO website campaign** (fact #5) → launch as a **separate new campaign**: `campaign.target = { "type":"new", "dailyBudgetCents": <n> }`, ad set targets `new`, lifecycle `entityLinking` with a **new** `mpc_` aggregate + its own pre-created `mpa_` drafts. (Creating a new tracked campaign aggregate needs a `meta/campaigns/draft` call or an equivalent `mpc_`+`mpa_` insert; mirror Step 6.)
+- **Target campaign must be lead-optimized, not a website CBO campaign** (fact #5). Two ways:
+  - **Into an EXISTING lead campaign** (best when one exists): check its ad sets via `SELECT id, meta_lead_gen_form_id, effective_status FROM motion_net.meta_ad_sets WHERE meta_published_campaign_id='<mpc>' AND deleted_at IS NULL`. If the live ad set(s) have `meta_lead_gen_form_id` set, it's a lead campaign → Instant Form fits (no website conflict). **Your `performanceGoal` must match the existing ad sets' optimization** under CBO (leads=LEAD_GENERATION vs conversionLeads=QUALITY_LEAD) — the DB doesn't store optimization_goal, so if unsure, try the operator's choice; a mismatch fails cleanly on the first `CreateAdSet` (no partial state) and you switch and retry. Verify the campaign's `team_id` matches your creatives' team (adOutput lookup is team-scoped — cross-team fails).
+  - **A brand-new campaign**: `campaign.target = { "type":"new", "dailyBudgetCents": <n> }`, ad set targets `new`, lifecycle `entityLinking` with a new `mpc_` aggregate + its own pre-created `mpa_` drafts (mirror Step 6; new campaign aggregate via `meta/campaigns/draft` or equivalent insert).
+- Reuse the already-registered `adOutputId`s for "same creatives, different ad set" (one AdOutput backs many ads; MetaAd rows are keyed by `(teamId, metaAdSetId, adOutputId, version)` so no collision across ad sets).
 
 ## Failure cleanup
 Delete only unpublished drafts, guarded: `DELETE FROM motion_net.meta_ads WHERE meta_ad_set_id IN (<mpa ids>); DELETE FROM motion_net.meta_ad_sets WHERE id IN (<mpa ids>) AND sync_status='draft' AND meta_ad_set_id IS NULL RETURNING id,name;` inside a transaction. Never touch synced/live ad sets.
