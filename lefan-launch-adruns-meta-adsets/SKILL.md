@@ -1,7 +1,7 @@
 ---
 name: lefan-launch-adruns-meta-adsets
 description: Launch CAMP ad-agent runs as new (tracked) Meta ad sets under an existing live Meta campaign for a team — register outputs, pre-create ad-set aggregate drafts, publish via motion.net stateless-meta-publish with entityLinking. Handles style filtering, location targeting from Business Info, website vs Instant Form modes, and the CBO/tokenSource/aggregate gotchas that block naive attempts.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Launch CAMP ad runs as Meta ad sets (tracked) under an existing campaign
@@ -67,7 +67,7 @@ Use the scratchpad dir for all payloads/creds. Keep the admin token and DB passw
 
 12. **Verify requested style slugs exist in the run before building.** Operators name slugs from memory; a run only contains its own styles (e.g. a whole-home run has no bathroom/joke styles). List `run.output[].style` (succeeded) and reconcile; if a requested slug is absent, surface it and ask (don't silently drop/substitute).
 
-13. **Adding ads to an EXISTING ad set builds website creatives only** (existing-target has no `instantForm` field; workflow sets `leadGenFormId=null`). So you can add ads to an existing *website* ad set, but **not** proper lead-form ads to an existing Instant Form ad set via this path — Meta rejects a link creative in a `LEAD_GENERATION` ad set. (A motion.net change to support Instant Form on existing ad sets exists on a branch — check if deployed before relying on it.)
+13. **Adding ads to an EXISTING ad set** (append creatives without recreating the ad set): use `adSets[].target = {type:"existing", metaAdSetId:"<id>"}` (+ that ad set's aggregate `mpa_` as `key`/`lifecycle.adSetId`; no draft/insert needed since the ad set already exists). Website ad set → just the ads. **Instant Form ad set → now supported** (deploy #9799): put the SAME `instantForm` block on the existing target (`{performanceGoal, source:{type:"existing", formId:"<the ad set's form>"}}`, `tokenSource:adAccount`) — the form attaches at the ad/creative level. (Before #9799 this was impossible — existing targets built formless website creatives that Meta rejects in a `LEAD_GENERATION` ad set; verify the deploy if unsure.)
 
 ---
 
