@@ -1,7 +1,7 @@
 ---
 name: lefan-launch-adruns-meta-adsets
 description: Launch CAMP ad-agent runs as new (tracked) Meta ad sets under an existing live Meta campaign for a team — register outputs, pre-create ad-set aggregate drafts, publish via motion.net stateless-meta-publish with entityLinking. Handles style filtering, location targeting from Business Info, website vs Instant Form modes, and the CBO/tokenSource/aggregate gotchas that block naive attempts.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Launch CAMP ad runs as Meta ad sets (tracked) under an existing campaign
@@ -19,13 +19,15 @@ Repos: CAMP (F#, `internal-tool-customer-management`) + motion.net (C#, `backend
 - **Team id** (`team_…`).
 - **Target campaign**: the CAMP/backend aggregate id (`mpc_…`) OR the Meta campaign id. You will resolve both.
 - **Ad runs** (`aar_…`) and, per run, the **style slugs** to include.
-- **Mode** per ad set: website conversions (default) or Instant Form (needs `existingFormId`).
+- **Mode** per ad set: website conversions (default) or Instant Form (needs an `instantForm.source`, e.g. an existing form id).
+
+> ⚠️ **motion.net contracts evolve — verify before building.** The `stateless-meta-publish` request shape (asset source, targeting, instantForm source, lifecycle) changes under active development and deploys land mid-session. If a publish behaves unexpectedly (e.g. creates a form when you meant to attach one), re-read the current contract on the deployed branch (`StatelessMetaPublishModels.cs` / `StatelessMetaPublishInstantFormModels.cs` / `StatelessMetaPublishValidator.cs`) rather than trusting a cached shape.
 - Budget: operator sets it themselves later (do not set it).
 
 ## Credentials / access (ask the operator; never hardcode; treat as secrets; tell them to ROTATE after)
 - `internal-tools` CLI logged in (`internal-tools whoami`) — reads/writes prod CAMP as the user.
 - **motion.net admin bearer token** (scheme `AdminBearer`) — for `backend-net.wonderly.com` admin + impersonated endpoints. Store in a gitignored scratchpad file, reference via `$(cat)`, never echo.
-- **Prod Postgres WRITE creds** (Citus coordinator, `motion` db) — only for the ad-set-draft INSERT/DELETE. Store as a clean libpq URL (`postgresql://user:pass@host:5431/motion?sslmode=require`) in a scratchpad file.
+- **Prod Postgres WRITE creds** (Citus coordinator, `motion` db) — **fallback only** (draft-ad-set endpoint replaces the INSERT; still handy for guarded failure-cleanup DELETE). Clean libpq URL (`postgresql://user:pass@host:5431/motion?sslmode=require`) in a scratchpad file. (These creds' grants can flicker mid-session — re-try/re-request if a write suddenly returns `permission denied`.)
 - `agent-gateway` MCP `database.prod.query_readonly` — for read-only prod inspection (schema, sibling rows, account provisioning).
 
 Use the scratchpad dir for all payloads/creds. Keep the admin token and DB password out of command echo.
@@ -41,7 +43,7 @@ Use the scratchpad dir for all payloads/creds. Keep the admin token and DB passw
    - `signedUrl` asset source ⇒ **`lifecycle: none`** (Meta-only, NOT in CAMP/Wonderly). Simpler, one call, no registration — use only if the operator is OK with untracked ad sets.
    - You cannot mix. Default to **entityLinking + adOutput** (tracked).
 
-3. **entityLinking needs pre-created `mpa_` ad-set aggregate rows under the SAME campaign as `lifecycle.campaignId`.** `UpsertAdSetAsync` (`MetaAdsResourceAggregateService.cs`) **does not create** ad-set rows (a novel id throws "MetaAdSet not found") and **refuses to re-parent** (draft's `meta_published_campaign_id` must equal `lifecycle.campaignId`, else "belongs to campaign row X"). There is **no API** to add ad-set drafts under an already-published campaign. So you **manually INSERT the `mpa_` draft rows** under the target campaign (see Step 5), then publish.
+3. **entityLinking needs pre-created `mpa_` ad-set aggregate rows under the SAME campaign as `lifecycle.campaignId`.** `UpsertAdSetAsync` (`MetaAdsResourceAggregateService.cs`) **does not create** ad-set rows (a novel id throws "MetaAdSet not found") and **refuses to re-parent** (draft's `meta_published_campaign_id` must equal `lifecycle.campaignId`, else "belongs to campaign row X"). **Create the drafts with `POST /api/v1/ad-engine/meta/campaigns/{campaignId}/adsets/draft`** (Step 6) — the supported way to add ad-set drafts under an existing (even published) campaign. Manual DB INSERT is the fallback only if that endpoint isn't deployed.
 
 4. **tokenSource:**
    - Website: `systemUser` works (for a `child-business-manager` account it's the CBM system-user token — check `account_type`).
@@ -60,6 +62,12 @@ Use the scratchpad dir for all payloads/creds. Keep the admin token and DB passw
 9. **`workflowId` is the Temporal idempotency key** — a retried identical request attaches to the in-flight run (no double publish). Use a fresh id per distinct attempt.
 
 10. **GATE each mutation on the previous succeeding.** (A publish fired before its draft rows existed once caused an avoidable failure — Temporal retried and it recovered only because the rows were inserted quickly.)
+
+11. **One run → multiple ad sets = one publish each.** Website + Instant Form can't share a publish run (validator) or a token source, so launching the same creatives as both a website ad set and an Instant Form ad set (often into two different campaigns) is **two separate register-once → draft-per-adset → publish** flows. Reuse the same registered `adOutputId`s across both.
+
+12. **Verify requested style slugs exist in the run before building.** Operators name slugs from memory; a run only contains its own styles (e.g. a whole-home run has no bathroom/joke styles). List `run.output[].style` (succeeded) and reconcile; if a requested slug is absent, surface it and ask (don't silently drop/substitute).
+
+13. **Adding ads to an EXISTING ad set builds website creatives only** (existing-target has no `instantForm` field; workflow sets `leadGenFormId=null`). So you can add ads to an existing *website* ad set, but **not** proper lead-form ads to an existing Instant Form ad set via this path — Meta rejects a link creative in a `LEAD_GENERATION` ad set. (A motion.net change to support Instant Form on existing ad sets exists on a branch — check if deployed before relying on it.)
 
 ---
 
@@ -98,13 +106,17 @@ Body:
 ```
 Response is AllModels: `ids[]` (adOutputIds, in submission order) + `models.adEngineAdOutputs.<id>.version`. Zip by order; assert every `version` is an int > 0.
 
-### Step 6 — Pre-create `mpa_` draft ad-set rows under the target campaign (DB write)
-These rows must exist before publish (fact #3). Mirror a real sibling row exactly.
-- Inspect: `information_schema.columns` for `motion_net.meta_ad_sets`; read an existing row under the target campaign (`SELECT … WHERE meta_published_campaign_id='<mpc>'`). Confirm `sync_status='draft'` is the encoding (lowercase) and the campaign row exists (FK).
-- Required NOT-NULL/no-default cols: `id, team_id, meta_published_campaign_id, sync_status, daily_budget_cents, created_at`. Leave targeting null (written at publish).
-- `id` = `mpa_` + **UUIDv7 hex** (48-bit ms ts, version nibble 7, variant 10, random). Generate one per ad set.
-- INSERT (one per ad set), `sync_status='draft'`, `daily_budget_cents=0`, `meta_ad_set_id=NULL`, `created_at=now()`, `updated_at=now()`, `name='<label>'`. Wrap in a transaction with a verify SELECT. Show SQL, get approval, run via `psql "$(cat .pgconn)" -v ON_ERROR_STOP=1 -f insert.sql`.
-- **Capture the new `mpa_` ids** — they become each ad set's `key` AND `lifecycle.adSets[].{key, adSetId}`.
+### Step 6 — Pre-create `mpa_` draft ad-set rows under the target campaign
+These rows must exist before publish (fact #3). **Preferred: use the draft-ad-set endpoint** (no DB write):
+```
+POST https://backend-net.wonderly.com/api/v1/ad-engine/meta/campaigns/{campaignId}/adsets/draft
+  (impersonation auth: AdminBearer + x-user-id + x-team-id + attribution)
+  body: { "name": "<ad set label>" }   # dailyBudgetCents? (>=100 if present) + targeting? optional — omit; publish sets targeting
+  -> 200 { "id": "mpa_…", "syncStatus":"draft", "metaAdSetId":null, ... }   # capture id
+```
+`campaignId` = the target aggregate `mpc_…`; the endpoint 404s if it isn't the impersonated team's campaign. One call per ad set. **Capture each returned `mpa_` id** — it becomes that ad set's `key` AND `lifecycle.adSets[].{key, adSetId}`.
+
+Fallback (only if the endpoint isn't deployed): manual INSERT into `motion_net.meta_ad_sets` mirroring a sibling row — `id`=`mpa_`+UUIDv7hex, `team_id`, `meta_published_campaign_id`=`<mpc>`, `sync_status='draft'`, `daily_budget_cents=0`, `meta_ad_set_id=NULL`, `created_at=now()`, `updated_at=now()`, `name` — via the Prod Postgres WRITE creds; show SQL + get approval; targeting null (publish fills it).
 
 ### Step 7 — Publish — motion.net admin
 `POST https://backend-net.wonderly.com/api/admin/v1/stateless-meta-publish`
@@ -147,7 +159,7 @@ Operator actions: set the campaign daily budget (CBO), flip ad sets `PAUSED→ac
 ---
 
 ## Instant Form variant
-- Each ad set adds `"instantForm": { "performanceGoal": "leads" | "conversionLeads", "existingFormId": "<form id>" }` (only valid on `target:new`).
+- Each ad set adds `"instantForm": { "performanceGoal": "leads" | "conversionLeads", "source": { "type": "existing", "formId": "<form id>" } }` (only valid on `target:new`). **The form is a `source` discriminated union** (`type`: `default` = Motion default form, `existing` = attach `{ "formId": "<id>" }`, `custom` = create from a `form` spec). ⚠️ **Contract note:** an older shape used flat `existingFormId`/`form` — that's dead; using it now silently falls back to `default` (creates a form) and errors "Each question must have a type." If a publish creates a form when you meant to attach one, you're on the old shape. Verify the current InstantForm contract before Instant Form work — motion.net's `StatelessMetaPublishInstantFormModels.cs` (union `StatelessMetaPublishInstantFormSource`).
 - `tokenSource: "adAccount"` (mandatory), **omit `metaPixelId`**, form must belong to the campaign's `facebookPageId`.
 - `leads`→`LEAD_GENERATION`; `conversionLeads`→`QUALITY_LEAD` (uses a `Schedule` conversion event; no pixel).
 - **Target campaign must be lead-optimized, not a website CBO campaign** (fact #5). Two ways:
